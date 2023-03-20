@@ -162,7 +162,8 @@ if backTest:
                 output.append([name])
                 outputTransact.append([name])
 
-
+            # Actual back testing algorithm; takes lists of buy or selling conditions, in addition to a state-flipping
+            # condition, and invests based on that.
             def template(t, buyMasks, sellMasks, condition, offset, k):
                 holding = False
                 cash = 0
@@ -210,12 +211,13 @@ if backTest:
 
                 n = 100
                 m = 50
+
+                # Constructs data sets for the bool masks
                 dates = [k for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
                 if not t == 'Action' and (dates[-1] - dates[0]) / yTS < t - 1: # If adding another year doesn't provide any new data points to the back tester
                     for value in output:
                         value.append('')
                     continue
-
                 values = [v for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
                 signals = np.array([d['Signal'] for d in values])
                 MACDs = np.array([d['MACD'] for d in values])
@@ -317,7 +319,7 @@ if visualizer:
     dateRange = maxDate - minDate
 
     zoom = 1 # >= 1
-    zoomOffset = 0 # Represents how far the displayed part of the graph is offset in terms of percentage of the window; > 0 and < (1 - zoom)
+    zoomOffset = 0 # Represents how far the displayed part of the graph is offset in terms of percentage of the window; 0 < offset < (1 - zoom)
     mouseXOld = 0
 
     # Main loop
@@ -363,7 +365,6 @@ if visualizer:
                 mouseXOld = mouseX
                 updateData = True
 
-
         # When display bounds are changed, change min/max prices and date
         if updateData:
             startTime = time.perf_counter()
@@ -403,7 +404,6 @@ if visualizer:
             updateData = False
             updateDisplay = True
             #print(f'Update time: {time.perf_counter() - startTime}')
-
 
         if updateDisplay:
             startTime = time.perf_counter()
