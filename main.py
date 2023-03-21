@@ -15,11 +15,11 @@ import numpy as np
 toCSV = False
 # stocks = ['AI', 'TSLA', 'AAPL', 'MSFT', 'UBS', 'BAIDF', 'GOOGL', 'AMZN', 'BRK-B', 'JNJ', 'XOM', 'WMT', 'JPM', 'PG', 'NVDA',
 #         'CVX', 'LLY', 'KO', 'DIS', 'MCD', 'HON', 'DE', 'F']
-stocks = ['TSLA', 'AAPL', 'XOM', 'LLY', 'MCD', 'NVDA']
+stocks = ['TSLA', 'AAPL', 'XOM', 'LLY', 'MCD', 'NVDA', 'AMD', 'TSM']
 showMAs = False
 MAPeriods = [100, 50]
 MACD = True
-visualizer = True
+visualizer = False
 backTest = True
 evalPeriod = 10
 
@@ -262,13 +262,13 @@ if backTest:
                 effectiveMACD = MACDs*2 - np.insert(MACDs[:-1], 0, 0)
                 buyMasks = [effectiveSignal < effectiveMACD]
                 sellMasks = [effectiveSignal > effectiveMACD]
-                template(t, buyMasks, sellMasks, effectiveSignal > effectiveMACD, True, i)
+                template(t, buyMasks, sellMasks, signals > MACDs, True, i)
                 i += 1
 
                 if t == 1:
-                    writeName('2-day Predictive MACD')
-                effectiveSignal = signals*3 - np.insert(signals[:-2], 0, [0, 0])*2
-                effectiveMACD = MACDs*3 - np.insert(MACDs[:-2], 0, [0, 0])*2
+                    writeName('Predictive MACD No Miss')
+                effectiveSignal = signals*2 - np.insert(signals[:-2], 0, [0, 0])
+                effectiveMACD = MACDs*2 - np.insert(MACDs[:-2], 0, [0, 0])
                 buyMasks = [effectiveSignal < effectiveMACD]
                 sellMasks = [effectiveSignal > effectiveMACD]
                 template(t, buyMasks, sellMasks, effectiveSignal > effectiveMACD, True, i)
@@ -281,7 +281,7 @@ if backTest:
                     effectiveMACD = MACDs*2 - np.insert(MACDs[:-1], 0, 0)
                     buyMasks = [effectiveSignal < effectiveMACD, close > ns]
                     sellMasks = [effectiveSignal > effectiveMACD, close < ns]
-                    template(t, buyMasks, sellMasks, effectiveSignal > effectiveMACD, True, i)
+                    template(t, buyMasks, sellMasks, signals > MACDs, True, i)
                     i += 1
 
             for row in output:
