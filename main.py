@@ -1,3 +1,5 @@
+import operator
+
 import requests
 import datetime
 import csv
@@ -12,16 +14,15 @@ import time
 import copy
 import numpy as np
 
-toCSV = False
-# stocks = ['AI', 'TSLA', 'AAPL', 'MSFT', 'UBS', 'BAIDF', 'GOOGL', 'AMZN', 'BRK-B', 'JNJ', 'XOM', 'WMT', 'JPM', 'PG', 'NVDA',
-#         'CVX', 'LLY', 'KO', 'DIS', 'MCD', 'HON', 'DE', 'F']
-stocks = ['TSLA', 'AAPL', 'XOM', 'LLY', 'MCD', 'NVDA', 'AMD', 'TSM']
+# stocks = ['VZ', 'NKE', 'CMCSA', 'NEE', 'PM', 'WFC', 'RTX', 'BMY', 'QCOM', 'UPS', 'NFLX', 'ORCL', 'T']
+stocks = ['TSLA', 'AAPL', 'XOM', 'LLY', 'NVDA', 'AMD', 'TSM', 'AVGO', 'COST', 'NFLX']
 showMAs = False
 MAPeriods = [100, 50]
 MACD = True
 visualizer = False
 backTest = True
 evalPeriod = 10
+toCSV = False
 
 stockData = {}
 allDates = set()
@@ -82,8 +83,12 @@ for symbol in stocks:
     finalValues = defaultdict(lambda: 0, {})
     MAQs = {}
     MACQ = []
+    RSILast = 0
+    RSIGain = 0
+    RSILoss = 0
     for period in MAPeriods:
         MAQs[period] = [0, deque()] # Sum, queue
+    bollingerQ = [0, deque()]
     for i, timestamp in enumerate(values['timestamp']):
         row = {}
 
@@ -92,7 +97,45 @@ for symbol in stocks:
             if tag != 'timestamp':
                 row[tag] = value[i]
 
-        # Calculate simple moving averages  
+        # Calculate RSI
+        period = 14
+        if i != 0:
+            currentGain = max(row['close'] - RSILast, 0)
+            currentLoss = max(RSILast - row['close'], 0)
+            if i >= period:
+                RSIGain = (RSIGain * (period - 1) + currentGain) / period
+                RSILoss = (RSILoss * (period - 1) + currentLoss) / period
+                row['RSI'] = 1 - 1 / (1 + RSIGain / RSILoss)
+            else:
+                RSIGain += currentGain / RSILast / period
+                RSILoss += currentLoss / RSILast / period
+        RSILast = row['close']
+
+        # Calculate Bollinger bands
+        period = 20
+        bollingerQ[0] += row['close']
+        bollingerQ[1].append(row['close'])
+        if i + 1 >= period:
+            bollingerMid = bollingerQ[0] / period
+            stdDev = np.std(list(bollingerQ[1]))
+            row['Bollinger High'] = bollingerMid + stdDev*2
+            row['Bollinger Low'] = bollingerMid - stdDev*2
+            bollingerQ[0] -= bollingerQ[1].popleft()
+
+        # Calculate MACD
+        periods = [12, 26]
+        if i == 0:
+            MACQ = [row['close']] * 3 # Creates the MACQ here
+        else:
+            k = lambda a : 2 / (a + 1)
+            for iterator, period in enumerate(periods):
+                MACQ[iterator] = row['close']*k(period) + MACQ[iterator]*(1 - k(period))
+            MACQ[2] = (MACQ[0] - MACQ[1])*k(9) + MACQ[2]*(1 - k(9))
+            if i + 1 >= periods[1]:
+                row['MACD'] = MACQ[0] - MACQ[1]
+                row['Signal'] = MACQ[2]
+
+        # Calculate simple moving averages
         for period, MAQ in MAQs.items():
             MAQ[0] += row['close']
             MAQ[1].append(row['close'])
@@ -100,20 +143,6 @@ for symbol in stocks:
                 row[period] = MAQ[0] / period  # Divides sum to get mean and then subtracts the next element from the queue
                 MAQ[0] -= MAQ[1].popleft()      # this is literally so genius
 
-        # Calculate MACD
-        if i == 0:
-            MACQ = [row['close']] * 3 # Creates the MACQ here
-        else:
-            periods = [12, 26]
-            k = lambda a : 2 / (a + 1)
-            for iterator, period in enumerate(periods):
-                MACQ[iterator] = row['close']*k(period) + MACQ[iterator]*(1 - k(period))
-            MACQ[2] = (MACQ[0] - MACQ[1])*k(9) + MACQ[2]*(1 - k(9))
-            if i + 1 > 26:
-                row['MACD'] = MACQ[0] - MACQ[1]
-                row['Signal'] = MACQ[2]
-
-        finalDate = []
         finalValues[timestamp] = row
 
     # Writes data to internal dict
@@ -144,152 +173,243 @@ if backTest:
         writerTransact = csv.writer(transactionFile, delimiter=',', quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
 
         for symbol in stocks:
-            # Writes header
-            row = [*range(1, evalPeriod + 1)]
-            row.insert(0, symbol)
-            writer.writerow(row + ['Action'])
-            writerTransact.writerow(row)
-
             stock = stockData[symbol]
             yTS = 60*60*24*365 # Years to seconds
-
             endDate = [*stock.keys()][-1]
+            startDate = endDate - yTS
             output = []
             outputTransact = []
 
+            n = MAPeriods[0]
+            m = MAPeriods[1]
+            if len([k for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]) > 0:
+                # Writes header
+                row = [*range(1, evalPeriod + 1)]
+                row.insert(0, symbol)
+                writer.writerow(row + ['Action'])
+                writerTransact.writerow(row)
 
-            def writeName(name):
-                output.append([name])
-                outputTransact.append([name])
 
-            # Actual back testing algorithm; takes lists of buy or selling conditions, in addition to a state-flipping
-            # condition, and invests based on that.
-            def template(t, buyMasks, sellMasks, condition, offset, k):
-                holding = False
-                cash = 0
-                minCash = 0
-                transactions = 0
-                action = ''
-                for i, value in enumerate(values):
-                    action = 'Hold'
-                    if (not offset and condition[i]) or (offset and i != 0 and condition[
-                        i - 1]):  # Represents a change in condition; ie. lines crossing
-                        buy = True
-                        for mask in buyMasks:
-                            if not mask[i]:
-                                buy = False
-                                break
-                        if buy:
-                            action = 'Buy'
-                            if not holding:
-                                cash -= value['close']
-                                holding = True
-                                minCash = min(cash, minCash)
-                                transactions += 1
+                def writeName(name):
+                    output.append([name])
+                    outputTransact.append([name])
+
+                # Actual back testing algorithm; takes lists of buy or selling conditions, in addition to a state-flipping
+                # condition, and invests based on that.
+                def template(buyMasks, sellMasks, condition, offset):
+                    holding = False
+                    cash = 0
+                    minCash = 0
+                    transactions = 0
+                    action = ''
+                    for k, value in enumerate(values):
+                        action = 'Hold'
+                        if (not offset and condition[k]) or (offset and k != 0 and condition[k - 1]):  # Represents a change in condition; ie. lines crossing
+                            buy = True
+                            for mask in buyMasks:
+                                if not mask[k]:
+                                    buy = False
+                                    break
+                            if buy:
+                                action = 'Buy'
+                                if not holding:
+                                    cash -= value['close']
+                                    holding = True
+                                    minCash = min(cash, minCash)
+                                    transactions += 1
+                        else:
+                            sell = True
+                            for mask in sellMasks:
+                                if not mask[k]:
+                                    sell = False
+                                    break
+                            if sell:
+                                action = 'Sell'
+                                if holding:
+                                    cash += value['close']
+                                    holding = False
+                    if holding:
+                        cash += values[-1]['close'] * holding
+
+                    if t == 'Action':
+                        output[i].append(action)
                     else:
-                        sell = True
-                        for mask in sellMasks:
-                            if not mask[i]:
-                                sell = False
-                                break
-                        if sell:
-                            action = 'Sell'
-                            if holding:
-                                cash += value['close']
-                                holding = False
-                if holding:
-                    cash += values[-1]['close'] * holding
+                        output[i].append(f'{round((cash / -minCash + 1) ** (1 / t) * 100 - 100, 2)}%' if transactions != 0 else '0.00%')
+                        outputTransact[i].append(transactions)
 
-                if t == 'Action':
-                    output[k].append(action)
-                else:
-                    output[k].append(f'{round((cash / -minCash + 1) ** (1 / t) * 100 - 100, 2)}%' if transactions != 0 else '0.00%')
-                    outputTransact[k].append(transactions)
+                for t in list(range(1, evalPeriod + 1)) + ['Action']:
+                    startDate = endDate - yTS if t == 'Action' else endDate - t*yTS
 
-            for t in list(range(1, evalPeriod + 1)) + ['Action']:
-                startDate = endDate - yTS if t == 'Action' else endDate - t*yTS
+                    # Constructs data sets for the bool masks
+                    dates = [k for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
+                    if t != 'Action' and (dates[-1] - dates[0]) / yTS < t - 1: # If adding another year doesn't provide any new data points to the back tester
+                        for value in output:
+                            value.append('')
+                        continue
+                    values = [v for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
+                    signals = np.array([d['Signal'] for d in values])
+                    MACDs = np.array([d['MACD'] for d in values])
+                    close = np.array([d['close'] for d in values])
+                    RSI = np.array([d['RSI'] for d in values])
+                    bolHigh = np.array([d['Bollinger High'] for d in values])
+                    bolLow = np.array([d['Bollinger Low'] for d in values])
+                    ns = np.array([d[n] for d in values])
+                    ms = np.array([d[m] for d in values])
+                    i = 0
 
-                n = 100
-                m = 50
+                    if t == 1:
+                        writeName('MACD')
+                    buyMasks = [signals < MACDs]
+                    sellMasks = [signals > MACDs]
+                    template(buyMasks, sellMasks, signals > MACDs, True)
+                    i += 1
 
-                # Constructs data sets for the bool masks
-                dates = [k for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
-                if not t == 'Action' and (dates[-1] - dates[0]) / yTS < t - 1: # If adding another year doesn't provide any new data points to the back tester
-                    for value in output:
-                        value.append('')
-                    continue
-                values = [v for k, v in stock.items() if startDate <= k <= endDate if 'Signal' in v and n in v]
-                signals = np.array([d['Signal'] for d in values])
-                MACDs = np.array([d['MACD'] for d in values])
-                close = np.array([d['close'] for d in values])
-                ns = np.array([d[n] for d in values])
-                ms = np.array([d[m] for d in values])
-                i = 0
-
-                if t == 1:
-                    writeName('MACD')
-                buyMasks = [signals < MACDs]
-                sellMasks = [signals > MACDs]
-                template(t, buyMasks, sellMasks, signals > MACDs, True, i)
-                i += 1
-
-                if n in MAPeriods:
                     if t == 1:
                         writeName(f'MACD and {n}-day MA')
                     buyMasks = [signals < MACDs, close > ns]
                     sellMasks = [signals > MACDs, close < ns]
-                    template(t, buyMasks, sellMasks, signals > MACDs, True, i)
+                    template(buyMasks, sellMasks, signals > MACDs, True)
                     i += 1
 
-                if n in MAPeriods and m in MAPeriods:
                     if t == 1:
                         writeName(f'{n}-day MA and {m}-day MA')
                     buyMasks = [ns < ms]
                     sellMasks = [ns > ms]
-                    template(t, buyMasks, sellMasks, ns > ms, True, i)
+                    template(buyMasks, sellMasks, ns > ms, True)
                     i += 1
 
-                if t == 1:
-                    writeName('Buy and Hold')
-                buyMasks = []
-                sellMasks = [[False]*len(values)]
-                template(t, buyMasks, sellMasks, [True]*len(values), True, i)
-                i += 1
+                    if t == 1:
+                        writeName('Buy and Hold')
+                    buyMasks = []
+                    sellMasks = [[False]*len(values)]
+                    template(buyMasks, sellMasks, [True]*len(values), False)
+                    i += 1
 
-                if t == 1:
-                    writeName('Predictive MACD')
-                effectiveSignal = signals*2 - np.insert(signals[:-1], 0, 0)
-                effectiveMACD = MACDs*2 - np.insert(MACDs[:-1], 0, 0)
-                buyMasks = [effectiveSignal < effectiveMACD]
-                sellMasks = [effectiveSignal > effectiveMACD]
-                template(t, buyMasks, sellMasks, signals > MACDs, True, i)
-                i += 1
+                    if t == 1:
+                        writeName('Predictive MACD')
+                    effectiveSignal = signals*2 - np.insert(signals[:-1], 0, 0)
+                    effectiveMACD = MACDs*2 - np.insert(MACDs[:-1], 0, 0)
+                    buyMasks = [effectiveSignal < effectiveMACD]
+                    sellMasks = [effectiveSignal > effectiveMACD]
+                    template(buyMasks, sellMasks, signals > MACDs, True)
+                    i += 1
 
-                if t == 1:
-                    writeName('Predictive MACD No Miss')
-                effectiveSignal = signals*2 - np.insert(signals[:-2], 0, [0, 0])
-                effectiveMACD = MACDs*2 - np.insert(MACDs[:-2], 0, [0, 0])
-                buyMasks = [effectiveSignal < effectiveMACD]
-                sellMasks = [effectiveSignal > effectiveMACD]
-                template(t, buyMasks, sellMasks, effectiveSignal > effectiveMACD, True, i)
-                i += 1
+                    if t == 1:
+                        writeName('Predictive MACD No Miss')
+                    effectiveSignal = signals*2 - np.insert(signals[:-2], 0, [0, 0])
+                    effectiveMACD = MACDs*2 - np.insert(MACDs[:-2], 0, [0, 0])
+                    buyMasks = [effectiveSignal < effectiveMACD]
+                    sellMasks = [effectiveSignal > effectiveMACD]
+                    template(buyMasks, sellMasks, effectiveSignal > effectiveMACD, True)
+                    i += 1
 
-                if n in MAPeriods:
                     if t == 1:
                         writeName(f'Predictive MACD and {n}-day MA')
                     effectiveSignal = signals*2 - np.insert(signals[:-1], 0, 0)
                     effectiveMACD = MACDs*2 - np.insert(MACDs[:-1], 0, 0)
                     buyMasks = [effectiveSignal < effectiveMACD, close > ns]
                     sellMasks = [effectiveSignal > effectiveMACD, close < ns]
-                    template(t, buyMasks, sellMasks, signals > MACDs, True, i)
+                    template(buyMasks, sellMasks, signals > MACDs, True)
                     i += 1
 
-            for row in output:
-                writer.writerow(row)
-            writer.writerow([])
-            for row in outputTransact:
-                writerTransact.writerow(row)
-            writerTransact.writerow([])
+                    if t == 1:
+                        writeName('RSI Divergence')
+                    holding = False
+                    cash = 0
+                    minCash = 0
+                    transactions = 0
+                    action = ''
+                    currentExtreme = -1
+                    lastExtreme = -1
+                    extremeRSI = -1
+                    currentIndex = 0
+                    timeout = 30
+                    margin = 0.01
+                    queue = deque()
+
+                    def extraction(l, g, m):
+                        global currentExtreme
+                        global lastExtreme
+                        global extremeRSI
+                        global currentIndex
+
+                        # Holds point if it's the first value or if values are decreasing
+                        if currentExtreme == -1 or value['close'] == currentExtreme or l(value['close'], currentExtreme):
+                            currentExtreme = value['close']
+                            return True
+                        # Saves new minimum if the current one is lower and the RSI is also lower
+                        if lastExtreme == -1 or (l(currentExtreme, lastExtreme) and l(values[k - 1]['RSI'], extremeRSI + m)):
+                            lastExtreme = currentExtreme
+                            extremeRSI = values[k - 1]['RSI']
+                            currentExtreme = value['close']
+                            currentIndex = k
+                            return True
+                        # Resets minimum if no lower minimum is found within the timeout duration
+                        if k - currentIndex > timeout:
+                            l = list(queue)
+                            lastExtreme = min(l)
+                            index = l.index(lastExtreme)
+                            currentIndex = k - (len(queue) - 1) + index
+                            extremeRSI = values[currentIndex]['RSI']
+                            currentExtreme = value['close']
+                            return True
+                        # Skips increasing values if the current min is higher
+                        if currentExtreme == lastExtreme or g(currentExtreme, lastExtreme):
+                            return True
+                        # Buys if the current min is lower but the RSI is higher
+                        if t == 10:
+                            print(f'{"BUY" if not holding else "Sell"} {value["datetime"]} {round(currentExtreme, 2)} |'
+                                  f' {values[currentIndex]["datetime"]} {round(lastExtreme, 2)} |'
+                                  f' {values[k - 1]["RSI"]} {extremeRSI + margin} |'
+                                  f' {value["close"]}')
+                        currentExtreme = value['close']
+                        lastExtreme = -1
+                        currentIndex = k
+                        return False
+
+                    for k, value in enumerate(values):
+                        action = 'Hold'
+                        queue.append(value['close'])
+                        if len(queue) > timeout:
+                            queue.popleft()
+                        if not holding: # Looking for local minima
+                            if extraction(operator.lt, operator.gt, margin):
+                                continue
+                            action = 'Buy'
+                            cash -= value['close']
+                            holding = True
+                            minCash = min(cash, minCash)
+                            transactions += 1
+                        else:
+                            if extraction(operator.gt, operator.lt, -margin):
+                                continue
+                            action = 'Sell'
+                            cash += value['close']
+                            holding = False
+
+                    if t == 'Action':
+                        output[i].append(action)
+                    else:
+                        if holding:
+                            cash += values[-1]['close'] * holding
+                        output[i].append(
+                            f'{round((cash / -minCash + 1) ** (1 / t) * 100 - 100, 2)}%' if transactions != 0 else '0.00%')
+                        outputTransact[i].append(transactions)
+                    i += 1
+
+                    if t == 1:
+                        writeName('Bollinger Band')
+                    buyMasks = [close < bolLow]
+                    sellMasks = [close > bolHigh]
+                    template(buyMasks, sellMasks, buyMasks[0], False)
+                    i += 1
+
+                for row in output:
+                    writer.writerow(row)
+                writer.writerow([])
+                for row in outputTransact:
+                    writerTransact.writerow(row)
+                writerTransact.writerow([])
 
 if visualizer:
     # Setup
